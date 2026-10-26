@@ -1,0 +1,41 @@
+#!/bin/bash
+# rgb-mood: PC lights follow the music, or the temperature when it's quiet (2026-10-26).
+#   rgb-mood on       start (OpenRGB server + the light loop), until reboot or `rgb-mood off`
+#   rgb-mood off      stop, fans back to the motherboard's own rainbow, RAM stays blue
+#   rgb-mood status   is it running?
+# Never starts at boot (Rabbid's rule). Code: ~/AI/apps/rgb-mood/rgb_mood.py
+APP="$HOME/AI/apps/rgb-mood"
+PY="$APP/.venv/bin/python"
+
+server_up() { (exec 3<>/dev/tcp/127.0.0.1/6742) 2>/dev/null; }
+
+case "${1:-status}" in
+  on)
+    if ! server_up; then
+      systemctl --user reset-failed openrgb-server rgb-mood 2>/dev/null
+      systemd-run --user --quiet --unit=openrgb-server openrgb --server --server-host 127.0.0.1 --noautoconnect
+      for _ in $(seq 1 40); do server_up && break; sleep 0.5; done
+      server_up || { echo "OpenRGB didn't start. Check: journalctl --user -u openrgb-server"; exit 1; }
+    fi
+    systemctl --user is-active --quiet rgb-mood || systemd-run --user --quiet --unit=rgb-mood "$PY" "$APP/rgb_mood.py"
+    echo "rgb-mood is ON: lights follow the music, or the temperature when it's quiet."
+    ;;
+  off)
+    systemctl --user stop rgb-mood 2>/dev/null
+    if server_up; then
+      "$PY" - <<'EOF'
+from openrgb import OpenRGBClient
+c = OpenRGBClient("127.0.0.1", 6742, "rgb-mood-off")
+for d in c.devices:
+    if d.type.name == "MOTHERBOARD":
+        d.set_mode("rainbow")
+EOF
+    fi
+    systemctl --user stop openrgb-server 2>/dev/null
+    echo "rgb-mood is OFF."
+    ;;
+  status)
+    if systemctl --user is-active --quiet rgb-mood; then echo "rgb-mood is ON"; else echo "rgb-mood is OFF"; fi
+    ;;
+  *) echo "usage: rgb-mood on | off | status"; exit 1 ;;
+esac
